@@ -17,14 +17,18 @@ except:
 
 wrapped_stdin = sys.stdin
 sys.stdin = sys.__stdin__
+
+# Kernel for IPython notebooks
 from IPython.kernel.manager import start_new_kernel
+
 sys.stdin = wrapped_stdin
 try:
     from Queue import Empty
 except:
     from queue import Empty
 
-from IPython.nbformat.current import reads, NotebookNode
+# from IPython.nbformat.current import reads, NotebookNode
+from IPython.nbformat import reads, NotebookNode
 
 
 # Colours for outputs
@@ -123,38 +127,41 @@ class IPyNbFile(pytest.File):
     # (which is in json format)
     def collect(self):
         with self.fspath.open() as f:
-            self.nb = reads(f.read(), 'json')
+            # self.nb = reads(f.read(), 'json')
+            self.nb = reads(f.read(), 4)
 
             # Start the cell count
             cell_num = 0
 
+            # Worksheets are NOT used anymore::
             # Currently there is only 1 worksheet (it seems in newer versions
             # of IPython, they are going to get rid of this option)
             # For every worksheet, read every cell associated to it
-            for ws in self.nb.worksheets:
-                for cell in ws.cells:
-                    # Skip the cells that have text, headings or related stuff
-                    # Only test code cells
-                    if cell.cell_type == 'code':
-                        # If the code is a notebook magic cell, do not run
-                        # i.e. cell code starts with '%%'
-                        # Also ignore the cells that start with the
-                        # comment string PYTEST_VALIDATE_IGNORE_OUTPUT
-                        # NOTE: This actually skips execution, which probably isn't what we want!
-                        #       It is typically helpful to execute the cell (to make sure that at
-                        #       least the code doesn't fail) but then discard the result.
-                        if not (cell.input.startswith('%%') or
-                                cell.input.startswith(r'# PYTEST_VALIDATE_IGNORE_OUTPUT') or
-                                cell.input.startswith(r'#PYTEST_VALIDATE_IGNORE_OUTPUT')):
 
-                            yield IPyNbCell(self.name, self, cell_num, cell)
+            for cell in self.nb.cells:
+                # Skip the cells that have text, headings or related stuff
+                # Only test code cells
+                if cell.cell_type == 'code':
 
-                        else:
-                            # Skipped cells will not be counted
-                            continue
+                    # If the code is a notebook magic cell, do not run
+                    # i.e. cell code starts with '%%'
+                    # Also ignore the cells that start with the
+                    # comment string PYTEST_VALIDATE_IGNORE_OUTPUT
+                    # NOTE: This actually skips execution, which probably isn't what we want!
+                    #       It is typically helpful to execute the cell (to make sure that at
+                    #       least the code doesn't fail) but then discard the result.
+                    if not (cell.source.startswith('%%') or
+                            cell.source.startswith(r'# PYTEST_VALIDATE_IGNORE_OUTPUT') or
+                            cell.source.startswith(r'#PYTEST_VALIDATE_IGNORE_OUTPUT')):
 
-                    # Update 'code' cell count
-                    cell_num += 1
+                        yield IPyNbCell(self.name, self, cell_num, cell)
+
+                    else:
+                        # Skipped cells will not be counted
+                        continue
+
+                # Update 'code' cell count
+                cell_num += 1
 
     def setup(self):
         """
@@ -231,7 +238,8 @@ class IPyNbCell(pytest.Item):
                                                        'prompt_number',
                                                        'stdout',
                                                        'stream',
-                                                       'output_type'
+                                                       'output_type',
+                                                       'name'
                                                        )):
         self.comparisons = []
 
@@ -266,6 +274,7 @@ class IPyNbCell(pytest.Item):
         # the same for the testing outputs (the cells that are boing executed)
         for testing in test:
             for key in testing.keys():
+                print 'TESTING:', key, '---', testing[key]
                 if key not in skip_compare:
                     try:
                         testing_outs[key] += self.sanitize(testing[key])
@@ -273,10 +282,12 @@ class IPyNbCell(pytest.Item):
                         testing_outs[key] = self.sanitize(testing[key])
 
         for key in reference_outs.keys():
+
+            print 'REFERENCE:', key, '---', reference_outs[key]
             # Check if they have the same keys
             if key not in testing_outs.keys():
                 self.comparisons.append(bcolors.FAIL
-                                        + "missing key: %s != %s"
+                                        + "missing key: TESTING %s != REFERENCE %s"
                                         % (testing_outs.keys(), reference_outs.keys())
                                         + bcolors.ENDC)
                 return False
@@ -325,7 +336,7 @@ class IPyNbCell(pytest.Item):
         # Execute the code from the current cell and get the msg_id
         # of the shell process.
         msg_id = self.parent.kernel.execute_cell_input(
-            self.cell.input, allow_stdin=False)
+            self.cell.source, allow_stdin=False)
 
         # Time for the reply of the cell execution
         timeout = 2000
@@ -338,7 +349,7 @@ class IPyNbCell(pytest.Item):
         # obtained: 'ok' OR 'error' OR 'abort'
         # We can also get how many cells have been executed
         # until here, with the 'execution_count' entry
-        #self.parent.kernel.kc.get_shell_msg(timeout=timeout)
+        # self.parent.kernel.kc.get_shell_msg(timeout=timeout)
 
         while True:
             """
@@ -367,20 +378,32 @@ class IPyNbCell(pytest.Item):
             to a reference output (the ones that are present before
             the notebook was executed)
             """
+            
+            # print msg
 
             # Firstly, get the msg type from the cell to know if
             # the output comes from a code
             # It seems that the type 'stream' is irrelevant
             msg_type = msg['msg_type']
+            reply = msg['content']
 
             # REF:
             # execute_input: To let all frontends know what code is
             # being executed at any given time, these messages contain a
             # re-broadcast of the code portion of an execute_request,
             # along with the execution_count.
-            if msg_type in ('status', 'execute_input'):
+            if msg_type == 'status':
+                if reply['execution_state'] == 'idle':
+                    break
+                else:
+                    continue
+            elif msg_type == 'execute_input':
                 continue
-
+            elif msg_type.startswith('comm'):
+                continue
+            elif msg_type == 'execute_reply':
+                # print msg
+                continue
             # If there is no more output, continue with the executions
             # (it will break if it is empty, with the previous statements)
             #
@@ -398,10 +421,10 @@ class IPyNbCell(pytest.Item):
             # state and when it finishes, it will enter the 'idle' state.
             # The kernel will publish state 'starting' exactly
             # once at process startup.
-            elif (msg_type == 'clear_output'
-                  and msg_type['execution_state'] == 'idle'):
-                outs = []
-                continue
+            # elif (msg_type == 'clear_output'
+            #       and msg_type['execution_state'] == 'idle'):
+            #     outs = []
+            #     continue
 
             # WE COULD ADD HERE a condition for the 'error' message type
             # Making the test to fail
@@ -417,6 +440,7 @@ class IPyNbCell(pytest.Item):
             if msg_type == 'stream':
                 out.stream = reply['name']
                 out.text = reply['text']
+
             elif msg_type in ('display_data', 'execute_result'):
                 # REF:
                 # data and metadata are identical to a display_data message.
@@ -439,7 +463,7 @@ class IPyNbCell(pytest.Item):
         It only indicates whether the entire cell ran successfully or if there
         was an error.
         """
-        reply = msg['content']
+        # reply = msg['content']
 
         failed = False
 
@@ -478,7 +502,7 @@ class IPyNbCell(pytest.Item):
                               # Still needs correction. We could
                               # add a description
                               "Error with cell",
-                              self.cell.input,
+                              self.cell.source,
                               # Here we must put the traceback output:
                               '\n'.join(self.comparisons))
 
