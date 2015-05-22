@@ -142,7 +142,6 @@ class IPyNbFile(pytest.File):
                 # Skip the cells that have text, headings or related stuff
                 # Only test code cells
                 if cell.cell_type == 'code':
-
                     # If the code is a notebook magic cell, do not run
                     # i.e. cell code starts with '%%'
                     # Also ignore the cells that start with the
@@ -232,23 +231,24 @@ class IPyNbCell(pytest.Item):
         return self.fspath, 0, description
 
     def compare_outputs(self, test, ref, skip_compare=('metadata',
-                                                       'png',
+                                                       'image/png',
                                                        'traceback',
                                                        'latex',
                                                        'prompt_number',
                                                        'stdout',
                                                        'stream',
                                                        'output_type',
-                                                       'name'
+                                                       'name',
+                                                       'execution_count'
                                                        )):
         self.comparisons = []
 
-        # For every different key, we will store the outputs in
+        # For every different key, we will store the outputs in a
         # single string, in a dictionary with the same keys
         # At the end, every dictionary entry will be compared
         # We skip the unimportant keys in the 'skip_compare' list
         #
-        # We append the outputs because the ipython notebook produces
+        # We concatenate the outputs because the ipython notebook produces
         # them in a random number of dictionaries. So, it is easier
         # to compare only one chunk of data
         testing_outs, reference_outs = {}, {}
@@ -264,17 +264,63 @@ class IPyNbCell(pytest.Item):
         for reference in ref:
             for key in reference.keys():
                 if key not in skip_compare:
-                    # Create the dictionary entries on the fly, from the
-                    # existing ones to be compared
-                    try:
-                        reference_outs[key] += self.sanitize(reference[key])
-                    except:
-                        reference_outs[key] = self.sanitize(reference[key])
+
+                    # In the EXECUTION, we already processed the display_data
+                    # (or execute_count)
+                    # kind of dictionary entries. display_data has a 'data'
+                    # sub dictionary which contains the relevant information
+                    # about the Figure: 'text/plain', 'image/png', ...
+                    #
+                    # EXAMPLES:
+                    #
+                    # display_data type:
+                    # {'output_type': 'display_data', 'image/png': 'iVBORw0...
+                    #  'text/plain': <matplotlib.figure.Figure at 0x7f9ca97cc890>
+                    #  'metadata': {} }
+                    #
+                    #
+                    # Hence, we look into these sub dictionary entries and
+                    # append them to the corresponding dictionary entry
+                    # in the reference outputs
+                    #
+                    if key == 'data':
+                        for data_key in reference[key].keys():
+                            # Filter the keys in the SUB-dictionary again
+                            if data_key not in skip_compare:
+                                try:
+                                    reference_outs[data_key] += self.sanitize(reference[key][data_key])
+                                except:
+                                    reference_outs[data_key] = self.sanitize(reference[key][data_key])
+
+
+                    # NOTICE: that execute_result (similar for figures than
+                    # display_data but without the png or picture hex)
+                    # has an 'execution_count' key
+                    # which we skip because is not relevant for now.
+                    # We could use this in the future if we wanted executions
+                    # in the same order than the reference
+                    #
+                    # execute_result type:
+                    # {'output_type': 'execute_result', 'execution_count': 9,
+                    #  'text/plain': '<matplotlib.image.AxesImage at 0x7f9ca8f058d0>',
+                    #  'metadata': {}}
+
+                    # Otherwise, just create a normal dictionary entry from
+                    # one of the keys of the dictionary
+                    else:
+                        # Create the dictionary entries on the fly, from the
+                        # existing ones to be compared
+                        try:
+                            reference_outs[key] += self.sanitize(reference[key])
+                        except:
+                            reference_outs[key] = self.sanitize(reference[key])
 
         # the same for the testing outputs (the cells that are boing executed)
+        # display_data cells were already processed! (see the execution loop)
         for testing in test:
             for key in testing.keys():
-                print 'TESTING:', key, '---', testing[key]
+                # For debugging:
+                # print 'TESTING:', key, '---', testing[key]
                 if key not in skip_compare:
                     try:
                         testing_outs[key] += self.sanitize(testing[key])
@@ -282,8 +328,9 @@ class IPyNbCell(pytest.Item):
                         testing_outs[key] = self.sanitize(testing[key])
 
         for key in reference_outs.keys():
+            # For debugging:
+            # print 'REFERENCE:', key, '---', reference_outs[key]
 
-            print 'REFERENCE:', key, '---', reference_outs[key]
             # Check if they have the same keys
             if key not in testing_outs.keys():
                 self.comparisons.append(bcolors.FAIL
@@ -378,7 +425,7 @@ class IPyNbCell(pytest.Item):
             to a reference output (the ones that are present before
             the notebook was executed)
             """
-            
+
             # print msg
 
             # Firstly, get the msg type from the cell to know if
@@ -436,23 +483,55 @@ class IPyNbCell(pytest.Item):
             reply = msg['content']
             out = NotebookNode(output_type=msg_type)
 
+            # print '---------------------------- CELL ----------------------'
+            # print msg_type
+            # print reply
+            # print '---------------------------- CELL ORIGINAL----------------'
+            # print self.cell.outputs
+
             # Now check what type of output it is
             if msg_type == 'stream':
                 out.stream = reply['name']
                 out.text = reply['text']
 
+            # REF:
+            # 'execute_result' is equivalent to a display_data message.
+            # The object being displayed is passed to the display
+            # hook, i.e. the *result* of the execution.
+            # The only difference is that 'execute_result' has an
+            # 'execution_count' number which does not seems useful
+            # (we will filter it in the sanitize function)
+            #
+            # When the reply is display_data or execute_count,
+            # the dictionary contains
+            # a 'data' sub-dictionary with the 'text' AND the 'image/png'
+            # picture (in hexadecimal). There is also a 'metadata' entry
+            # but currently is not of much use, sometimes there is information
+            # as height and width of the image (CHECK the documentation)
+            # Thus we iterate through the keys (mimes) 'data' sub-dictionary
+            # to obtain the 'text' and 'image/png' information
+            #
+            # We NO longer replace 'image/png' by 'png' since the last version
+            # of the notebook format is more consistent. We also DO NOT
+            # replace any .xml string, it's not neccesary
+
+            # elif msg_type in ('display_data', 'execute_result'):
             elif msg_type in ('display_data', 'execute_result'):
-                # REF:
-                # data and metadata are identical to a display_data message.
-                # the object being displayed is that passed to the display
-                #  hook, i.e. the *result* of the execution.
                 out['metadata'] = reply['metadata']
                 for mime, data in reply['data'].iteritems():
-                    attr = mime.split('/')[-1].lower()
-                    attr = attr.replace('+xml', '').replace('plain', 'text')
-                    setattr(out, attr, data)
-                if msg_type == 'execute_result':
-                    out.prompt_number = reply['execution_count']
+                # This could be useful for reference or backward compatibility
+                #     attr = mime.split('/')[-1].lower()
+                #     attr = attr.replace('+xml', '').replace('plain', 'text')
+                #     setattr(out, attr, data)
+
+                # Return the relevant entries from data:
+                # plain/text, image/png, execution_count, etc
+                # We coul use a mime types list for this (MAYBE)
+                    setattr(out, mime, data)
+
+                # if msg_type == 'execute_result':
+                #     out.prompt_number = reply['execution_count']
+
             else:
                 print("unhandled iopub msg:", msg_type)
 
