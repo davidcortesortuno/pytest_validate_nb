@@ -239,7 +239,8 @@ def runtest(cell, iopub):
 
         print '--------------------------- CELL --------------------------'
         print outs
-
+        print '------------------------- ORIGINAL CELL -------------------'
+        print cell.outputs
 
 km, kc = start_new_kernel(extra_arguments=['--matplotlib=inline'],
                           stderr=open(os.devnull, 'w'))
